@@ -19,35 +19,64 @@
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 import matplotlib.pyplot as plt
 
 from portfolio import Portfolio
 from backtest import fine_tuning_k_means, backtest_fun, plot_results_backtest
 
 # %% [markdown]
-# # Build Class and function
-
-# %% [markdown]
-# ## Collect and Download Data
-
-# %%
-data_csv = pd.read_csv('data/SandP500.csv')
-data_csv.sort_values(by='Symbol', inplace = True)
-
-# %% [markdown]
-# ### Download (If you already have dataset, you can skip it)
+# # Define Investment Universe
+#
+# We are focused on portfolio optimisation, and not stock picking.\
+# Thus for simplicty, our investment universe will be the current S&P 500 constituents with daily price data from 2000 to 2024.
 
 # %%
-# portfolio = Portfolio(data_csv)
-# portfolio.get_data_yahoo(save = True, path = "data\\price_data.csv", no_nan = True)
-
-# %% [markdown]
-# ### Prepare the Dataset
+# Get current constituents of S&P 500
+sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+sp500
 
 # %%
-price_data =  pd.read_csv('data/price_data.csv', index_col=0)
+# Get price data from yfinance
+prices = yf.download(sp500['Symbol'].tolist(), auto_adjust=False,
+                     start='2000-01-01', end='2024-12-31')['Adj Close']
+prices.head()
+
+# %%
+# Filter only stocks that have daily price data throughout time period
+prices = prices.dropna(axis=1)
+prices.to_csv('data/prices.csv')
+
+sp500 = sp500[sp500['Symbol'].isin(prices.columns)]
+sp500 = sp500.sort_values(by='Symbol').reset_index(drop=True)
+sp500.to_csv('data/sp500.csv')
+
+sp500
+
+# %% [markdown]
+# # Community Portfolio
+
+# %%
+# data_csv = pd.read_csv('data/SandP500.csv')
+# data_csv.head()
+
+data_csv = sp500[['Symbol', 'Security', 'GICS Sector']]
+data_csv.columns = ['Symbol', 'Name', 'Sector']
+data_csv = data_csv.sort_values(by='Symbol').reset_index(drop=True)
+data_csv.head()
+
+# %%
+# price_data =  pd.read_csv('data/price_data.csv', index_col=0)
+
+price_data =  pd.read_csv('data/prices.csv', index_col=0)
+price_data.head()
+
+# %%
 portfolio = Portfolio(data_csv, price_data = price_data)
 portfolio.compute_return()
+
+# %% [markdown]
+# ## Stability
 
 # %%
 portfolio.plot_stability()
