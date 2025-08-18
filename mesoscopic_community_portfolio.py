@@ -13,10 +13,16 @@
 #     name: python3
 # ---
 
+# %% [markdown]
+# # Investment Universe
+#
+# We are focused on portfolio optimisation, and not stock picking.\
+# Thus for simplicty, our investment universe will be the current S&P 500 constituents with daily price data from 2000 to 2024.
+
 # %%
 # %load_ext autoreload
 # %autoreload 2
-
+    
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -25,24 +31,17 @@ import matplotlib.pyplot as plt
 from portfolio import Portfolio
 from backtest import fine_tuning_k_means, backtest_fun, plot_results_backtest
 
-# %% [markdown]
-# # Define Investment Universe
-#
-# We are focused on portfolio optimisation, and not stock picking.\
-# Thus for simplicty, our investment universe will be the current S&P 500 constituents with daily price data from 2000 to 2024.
+dir_data = 'data/'
+dir_fig = 'fig/'
 
 # %%
 # Get current constituents of S&P 500
 sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
-sp500
 
-# %%
 # Get price data from yfinance
 prices = yf.download(sp500['Symbol'].tolist(), auto_adjust=False,
                      start='2000-01-01', end='2024-12-31')['Adj Close']
-prices.head()
 
-# %%
 # Filter only stocks that have daily price data throughout time period
 prices = prices.dropna(axis=1)
 prices.to_csv('data/prices.csv')
@@ -54,39 +53,73 @@ sp500.to_csv('data/sp500.csv')
 sp500
 
 # %% [markdown]
-# # Community Portfolio
+# # Mesoscopic Community Portfolio
+
+# %% [markdown]
+# ## Create Porfolio
 
 # %%
-# data_csv = pd.read_csv('data/SandP500.csv')
-# data_csv.head()
+# sectors = pd.read_csv(dir_data + 'SandP500.csv')
+# sectors.head()
 
-data_csv = sp500[['Symbol', 'Security', 'GICS Sector']]
-data_csv.columns = ['Symbol', 'Name', 'Sector']
-data_csv = data_csv.sort_values(by='Symbol').reset_index(drop=True)
-data_csv.head()
+sectors = pd.read_csv(dir_data + 'sp500.csv')
+sectors = sectors[['Symbol', 'Security', 'GICS Sector']]
+sectors.columns = ['Symbol', 'Name', 'Sector']
+sectors = sectors.sort_values(by='Symbol').reset_index(drop=True)
+sectors.head()
 
 # %%
-# price_data =  pd.read_csv('data/price_data.csv', index_col=0)
+# price_data =  pd.read_csv(dir_data + 'price_data.csv', index_col=0)
 
 price_data =  pd.read_csv('data/prices.csv', index_col=0)
 price_data.head()
 
 # %%
-portfolio = Portfolio(data_csv, price_data = price_data)
-portfolio.compute_return()
+portfolio = Portfolio(price_data, dict(zip(sectors['Symbol'], sectors['Sector'])))
 
 # %% [markdown]
-# ## Stability
+# ## Mesocopic Correlation
 
 # %%
-portfolio.plot_stability()
+# plot eigenspectrum deomposition
+eigvals, _, components, lambda_max, lambda_1 = portfolio.mesoscopic_decompose()
+df = pd.DataFrame({'component': components, 'eigval': eigvals})
+df = df.pivot(columns='component', values='eigval')
+
+fig, axs = plt.subplots(1, 2, figsize=(10,5), sharey=True)
+# left tail
+df[df.sum(axis=1) < lambda_max+1].plot.hist(
+    bins=50, density=False, stacked=True, legend=False, ax=axs[0])
+axs[0].set_title('Left Tail')
+# right tail
+df.iloc[-10:].plot.hist(bins=50, density=False, stacked=True, ax=axs[1])
+axs[1].legend(title='Component')
+axs[1].set_title('Right Tail')
+# overall
+plt.suptitle('Eigenspectrum of Correlation Matrix')
+plt.tight_layout()
+plt.savefig(dir_fig + 'meso_corr_spectrum.png')
+plt.show()
+
+# %%
+# calculate cumulative risks
+risks = portfolio.rolling_cumulative_risk(window=252, step=1)
+risks_frac = risks.div(risks.sum(axis=1), axis=0)
+
+# plot
+risks_frac.plot(figsize=(12,6))
+plt.title('Rolling 1-year Cumulative Risk\nFraction by Component (Daily Returns)')
+plt.xlabel('Window Start Date')
+plt.ylabel('Risk Fraction\n(Daily Returns)')
+plt.legend(title='Component')
+plt.savefig(dir_fig + 'meso_corr_rolling.png')
+plt.show()
 
 # %% [markdown]
 # ## Community
 
 # %%
 for i in ('Louvain', 'Label', 'Kmean'):
-    portfolio.mesoscopic_filter()
     portfolio.community_discover(algo = i)
     portfolio.plot_communities_pie(title = i)
     plt.show()

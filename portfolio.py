@@ -2,9 +2,13 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import cvxpy as cp
+
+import warnings
+from tqdm import tqdm
+from tqdm_joblib import tqdm_joblib
+from joblib import Parallel, delayed
 from collections import Counter, defaultdict
 
-import yfinance as yf
 import matplotlib.pyplot as plt
 
 from sklearn.cluster import KMeans, DBSCAN
@@ -16,229 +20,156 @@ class Portfolio:
 
     Parameters
     ----------
-    data_csv : pd.DataFrame
-        Dataframe of all the assets in investment universe. Must include 
-        `Symbol` and `Sector` columns for the assets.
-    start : str, optional
-        Start date for data, in 'YYYY-MM-DD' format. Default is "2000-01-01".
-    end : str, optional
-        End date for data, in 'YYYY-MM-DD' format. Default is "2024-12-31".
-    price_data : pd.DataFrame, optional
-        Preloaded price data to use instead of downloading from Yahoo Finance.
-    returns : pd.DataFrame, optional
-        Precomputed returns to use instead of computing from price data.
+    price_data : pd.DataFrame
+        Price data with tickers as columns and timesteps as rows.
+    sectors : dictionary
+        Maps from ticker to sector.
     """
-    def __init__(self, data_csv, start="2000-01-01", end="2024-12-31", 
-        price_data=None, returns = None):
-        self.data_csv = data_csv
-        self.symbols = self.data_csv['Symbol']
-        self.sector = self.data_csv['Sector']
-        self.start = start
-        self.end = end
+    def __init__(self, price_data, sectors):
+        # filter inner join of price_data and sectors
+        tmp = set(price_data.columns) - set(sectors.keys())
+        if len(tmp) > 0:
+            warnings.warn(f'{tmp} do not have sectors specified and was dropped')
+        price_data = price_data[price_data.columns.intersection(sectors.keys())]
+
+        # save arguments
+        self.sectors = sectors
         self.price_data = price_data
-        self.returns = returns
-        self.dates = None
-        self.C_g = None
-        self.D = None
-        self.cov_g = None
+        self.returns = self.price_data.pct_change()
+        self.stddev = self.returns.std()
+
+        # Laloux filter
+        self.mesoscopic_filter()
+
         self.communities = None
         self.weight = None
 
-    def get_data_yahoo(self, save = False, path = None, no_nan = True):
+    ##########################
+    # Mesoscopic Correlation #
+    ##########################
+
+    def mesoscopic_decompose(self, start=None, end=None):
         """
-        Download asset price data from Yahoo Finance and store the adjusted close prices.
+        Decompose the correlation matrix eigen-spectrum into components from
+        Random Noise, Mesoscopic, and Market modes following Laloux 1999.
+
+        Reference
+        ---------
+        Laloux, L., Cizeau, P., Bouchaud, J.-P., & Potters, M. (1999).
+        Noise Dressing of Financial Correlation Matrices.
+        Physical Review Letters, 83(7), 1467–1470.
+        https://doi.org/10.1103/PhysRevLett.83.1467
 
         Parameters
         ----------
-        save : bool, optional
-            If True, saves the price data to a CSV file at the given path. Default is False.
-        path : str or None, optional
-            Path to save the CSV file, required if `save` is True.
-        no_nan : bool, optional
-            If True, drop tickers with any missing price data. Default is True.
-
-        Raises
-        ------
-        ValueError
-            If `save` is True and `path` is not specified.
-        """
-        self.price_data = yf.download(self.symbols.to_list(), self.start , 
-            self.end, auto_adjust=False)['Adj Close']    
-        if no_nan:
-            self.price_data.dropna(axis=1, inplace = True)
-        if save:
-            if path is None:
-                raise ValueError("Path must be specified if save is True.")
-            self.price_data.to_csv(path)
-
-
-    def _evaluate_cov_g(self):
-        """
-        Constructs the covariance matrix from the mesoscopic-filtered correlation matrix.
+        start : str, int, or None, optional
+            Start index/date to consider. Defaults to start of DataFrame.
+        end : str, int, or None, optional
+            End index/date to consider. Defaults to end of DataFrame.
 
         Returns
         -------
-        np.ndarray
-            The filtered covariance matrix.
+        eigvals : np.ndarray of shape (N,)
+            Eigenvalues of the correlation matrix.
+        eigvecs : np.ndarray of shape (N, N)
+            Corresponding eigenvectors of the correlation matrix.
+        components : np.ndarray of str, shape (N,)
+            Component labels for each eigenvalue and eigenvector.
+        lambda_max : float
+            The Marcenko–Pastur upper bound for random eigenvalues.
+        lambda_1 : float
+            The largest eigenvalue (market mode).
         """
-        self.D = np.diag(self.returns.std().values)
-        self.cov_g = self.D @ self.C_g @ self.D
-        return self.cov_g
+        # get eigenspectrum of correlation matrix
+        corr_matrix = self.returns[start:end].corr()
+        eigvals, eigvecs = np.linalg.eigh(corr_matrix)
 
-    def compute_return(self):
-        """
-        Compute asset returns from price data and update internal attributes.
+        # market eigenvalue
+        lambda_1 = np.max(eigvals)
 
-        Returns
-        -------
-        pd.DataFrame
-            The computed returns dataframe.
+        # Marcenko-Pastur distribution (w/o market)
+        T, N = self.returns[start:end].shape
+        lambda_max = (1 - lambda_1/N) * (1 + np.sqrt(N/T))**2
 
-        Raises
-        ------
-        ValueError
-            If neither price data nor returns are available.
-        """
-        if self.price_data is None and self.returns is None:
-             raise ValueError("Price data not available, download or use a valid dataframe")
-        elif self.returns is None:
-            self.price_data.dropna(axis = 1, inplace = True)
-            self.returns = self.price_data.pct_change().dropna()
-        self.symbols =  self.returns.columns.to_list()
-        self.dates = pd.to_datetime(self.returns.index)
-        self.sector = self.data_csv[self.data_csv['Symbol'].isin(self.returns.columns)]['Sector'].to_list()
-        return self.returns
+        # classify into components
+        components = np.where(eigvals <= lambda_max, 'Random Noise',
+            np.where(eigvals < lambda_1, 'Mesoscopic', 'Market'))
+
+        return eigvals, eigvecs, components, lambda_max, lambda_1
 
     def mesoscopic_filter(self):
         """
-        Apply a mesoscopic filter (Random Matrix Theory based) to the 
-        correlation matrix, isolating the significant (non-random) eigenmodes.
+        Apply the Laloux 1998 corrections to the correlation matrix, removing
+        the Market and Random Noise components.
 
         Returns
         -------
         np.ndarray
             The mesoscopically-filtered correlation matrix.
-
-        Raises
-        ------
-        ValueError
-            If returns data have not been computed.
         """
-        if self.returns  is None:
-            raise ValueError("No return, please before compute return")
-        corr_matrix = self.returns.corr().values
-        T, N = self.returns .shape
-        eigvals, eigvecs = np.linalg.eigh(corr_matrix)
-        Q = T / N
-        lambda_max = (1 + 1 / np.sqrt(Q))**2
-        lambda_1 = eigvals[-1] #isolate the biggest eigenvalue
-        sigma2 = 1 - lambda_1 / N
-        lambda_max = sigma2 * (1 + 1 / np.sqrt(Q))**2 #Laloux correction
-        meso_indices = np.where((eigvals > lambda_max) & (eigvals < lambda_1))[0]
-        C_g = np.zeros((N, N))
-        for i in meso_indices:
-            C_g += eigvals[i] * np.outer(eigvecs[:, i], eigvecs[:, i])
-        self.C_g = C_g
-        self.cov_g = self._evaluate_cov_g()
-        return self.C_g
+        # filter mesoscopic eigenvalue & eigenvectors
+        eigvals, eigvecs, components, _, _ = self.mesoscopic_decompose()
+        filt = (components == 'Mesoscopic')
+        eigvals = eigvals[filt]
+        eigvecs = eigvecs[:,filt]
+        # reconstruct mesoscopic correlation & covariance
+        self.corr_g =  eigvecs @ np.diag(eigvals) @ eigvecs.T
+        self.cov_g = np.diag(self.stddev) @ self.corr_g @ np.diag(self.stddev)
 
-    @staticmethod
-    def _get_risk_fractions(returns_window):
+        return self.corr_g
+
+    def cumulative_risk(self, start=None, end=None):
         """
-        Compute the fraction of total risk attributable to noise, market, and 
-        mesoscopic modes for a given returns window.
+        Calculate the cumulative risk attributed to each component
 
         Parameters
         ----------
-        returns_window : pd.DataFrame
-            Window of returns data.
+        start : str, int, or None, optional
+            Start index/date to consider. Defaults to start of DataFrame.
+        end : str, int, or None, optional
+            End index/date to consider. Defaults to end of DataFrame.
 
         Returns
         -------
         dict
-            Dictionary with keys "noise", "market", and "meso" for their 
-            respective risk fractions.
+            Maps component to cumulative risk
         """
-        T, N = returns_window.shape
-        corr = returns_window.corr().values
+        eigvals, _, components, _, _ = self.mesoscopic_decompose(start, end)
+        risk = {label: eigvals[components == label].sum()
+                for label in np.unique(components)}
+        return risk
 
-        eigvals, _ = np.linalg.eigh(corr)
-        eigvals = np.sort(eigvals)
-
-        Q = T / N
-        lambda_1 = eigvals[-1]
-        sigma2 = 1 - lambda_1 / N
-        lambda_max = sigma2 * (1 + 1 / np.sqrt(Q))**2
-
-        noise = eigvals[eigvals <= lambda_max]
-        market = np.array([lambda_1])
-        meso = eigvals[(eigvals > lambda_max) & (eigvals < lambda_1)]
-
-        total_risk = np.sum(eigvals)
-
-        return {
-            "noise": np.sum(noise) / total_risk,
-            "market": np.sum(market) / total_risk,
-            "meso": np.sum(meso) / total_risk,
-        }
-
-    def plot_stability(self, windows_years = 2):
+    def rolling_cumulative_risk(self, window=252, step=5, n_jobs=-1):
         """
-        Plot the dynamics of risk fractions (noise, market, mesoscopic) over 
-        time using rolling windows.
+        Compute the risk attributed to each spectral component over rolling
+        windows of returns.
 
         Parameters
         ----------
-        windows_years : int, optional
-            Window length in years for the rolling calculation. Default is 2.
+        window : int, optional
+            The number of trading days in each rolling window (default is 252).
+        step : int, optional
+            The stride with which the rolling window advances (default is 5).
+        n_jobs : int, optional
+            Number of parallel jobs to use (default is -1).
 
-        Raises
-        ------
-        ValueError
-            If returns data have not been computed before plotting.
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame indexed by window start, with components as columns
         """
-        if self.dates is None:
-            raise ValueError("No date available, please run compute_return first")
-        windows = []
-        start = self.dates[0]
+        idx = range(0, self.returns.shape[0] - window, step)
+        with tqdm_joblib(tqdm(total=len(idx))) as progress_bar:
+            data = Parallel(n_jobs=n_jobs)(
+                delayed(self.cumulative_risk)(i, i+window)
+                for i in idx
+            )
+        index = [self.returns.index[i] for i in idx]
+        return pd.DataFrame(data, index=index)
 
-        while start + pd.DateOffset(years = windows_years) < self.dates[-1]:
-            end = start + pd.DateOffset(years = windows_years)
-            windows.append((start, end))
-            start = end
-        risks = []
-
-        for start, end in windows:
-            returns = np.exp(self.returns ) - 1
-            returns.index = pd.to_datetime(returns.index)
-            subset = returns[(returns.index >= start) & (returns.index < end)]
-            risks.append(self._get_risk_fractions(subset))
-
-        risk_df = pd.DataFrame(risks)
-        risk_df['window_start'] = [w[0] for w in windows]
-        risk_df.set_index('window_start', inplace=True)
-        diffs = risk_df.diff().dropna()
-        std_noise = diffs['noise'].std()
-        std_market = diffs['market'].std()
-        std_meso = diffs['meso'].std()
-
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(risk_df.index, risk_df['noise'], label='Noise', color = "red", marker = 'o', linestyle = 'dashed')
-        ax.plot(risk_df.index, risk_df['market'], label='Systemic', color = "blue", marker = 'o', linestyle = 'dashed')
-        ax.plot(risk_df.index, risk_df['meso'], label='Mesoscopic', color = "green", marker = 'o', linestyle = 'dashed')
-
-
-        ax.text(risk_df.index[3], risk_df['noise'].iloc[3], rf'$\sigma_r={std_noise:.3f}$', va='bottom', ha='left', size = 12,bbox=dict(facecolor='white', alpha=0.5))
-        ax.text(risk_df.index[3], risk_df['market'].iloc[3], rf'$\sigma_s={std_market:.3f}$', va='bottom', ha='right', size = 12,bbox=dict(facecolor='white', alpha=0.5))
-        ax.text(risk_df.index[3], risk_df['meso'].iloc[3], rf'$\sigma_g={std_meso:.3f}$', va='bottom', ha='left', size = 12,bbox=dict(facecolor='white', alpha=0.5))
-
-        ax.set_title('Cumulative Risk Fractions over Time')
-        ax.set_ylabel('Fraction of Total Risk')
-        ax.set_xlabel('Start of 2-Year Window')
-        ax.legend()
-        ax.grid(True)
-        fig.tight_layout()
-        plt.show()
+    #######################
+    # Community Detection #
+    #######################
 
     @staticmethod
     def _commu_to_list(G, communities):
@@ -328,13 +259,8 @@ class Portfolio:
         list of int
             Corresponding integer labels for each sector.
         """
-        # Crea la mappatura settore → numero
-        sector_to_number = {sector: i for i, sector in enumerate(set(list_sector))}
-
-        # Applica la mappatura
-        mapped_sectors = [sector_to_number[sector] for sector in list_sector]
-
-        return mapped_sectors
+        labels, uniques = pd.factorize(list_sector)
+        return labels.tolist()
 
     def community_discover(self, algo = "Louvain", seed = 42, **kwargs):
         """
