@@ -71,6 +71,20 @@ class Portfolio:
                 raise ValueError("Path must be specified if save is True.")
             self.price_data.to_csv(path)
 
+
+    def _evaluate_cov_g(self):
+        """
+        Constructs the covariance matrix from the mesoscopic-filtered correlation matrix.
+
+        Returns
+        -------
+        np.ndarray
+            The filtered covariance matrix.
+        """
+        self.D = np.diag(self.returns.std().values)
+        self.cov_g = self.D @ self.C_g @ self.D
+        return self.cov_g
+
     def compute_return(self):
         """
         Compute asset returns from price data and update internal attributes.
@@ -97,19 +111,9 @@ class Portfolio:
 
     def mesoscopic_filter(self):
         """
-        Apply the Laloux et al. (1998) noise filter to the correlation matrix, removing:
-        1. eigenvalues below the upper limit of the random Marčenko–Pastur distribution
-        2. the largest eigenvalue corresponding to market effects
-    
-        The filtered correlation matrix is reconstructed using the significant eigenmodes.
-    
-        Reference
-        ---------
-        Laloux, L., Cizeau, P., Bouchaud, J.-P., & Potters, M. (1999).
-        Noise Dressing of Financial Correlation Matrices.
-        Physical Review Letters, 83(7), 1467–1470.
-        https://doi.org/10.1103/PhysRevLett.83.1467
-    
+        Apply a mesoscopic filter (Random Matrix Theory based) to the 
+        correlation matrix, isolating the significant (non-random) eigenmodes.
+
         Returns
         -------
         np.ndarray
@@ -122,23 +126,20 @@ class Portfolio:
         """
         if self.returns  is None:
             raise ValueError("No return, please before compute return")
-
-        # get eigenspectrum of correlation matrix
-        corr_matrix = self.returns.corr()
+        corr_matrix = self.returns.corr().values
+        T, N = self.returns .shape
         eigvals, eigvecs = np.linalg.eigh(corr_matrix)
-
-        # apply Laloux's corrections
-        T, N = self.returns.shape
-        lambda_max = 1 * (1 + np.sqrt(N/T))**2
-        filt = (eigvals > lambda_max) # filter out Marcenko-Pastur distribution
-        filt = filt & (eigvals < np.max(eigvals)) # filter out market eigval
-        eigvals = eigvals[filt]
-        eigvecs = eigvecs[:,filt]
-        
-        # reconstruct correlation
-        self.C_g =  eigvecs @ np.diag(eigvals) @ eigvecs.T
-        self.D = np.diag(self.returns.std().values)
-        self.cov_g = self.D @ self.C_g @ self.D
+        Q = T / N
+        lambda_max = (1 + 1 / np.sqrt(Q))**2
+        lambda_1 = eigvals[-1] #isolate the biggest eigenvalue
+        sigma2 = 1 - lambda_1 / N
+        lambda_max = sigma2 * (1 + 1 / np.sqrt(Q))**2 #Laloux correction
+        meso_indices = np.where((eigvals > lambda_max) & (eigvals < lambda_1))[0]
+        C_g = np.zeros((N, N))
+        for i in meso_indices:
+            C_g += eigvals[i] * np.outer(eigvecs[:, i], eigvecs[:, i])
+        self.C_g = C_g
+        self.cov_g = self._evaluate_cov_g()
         return self.C_g
 
     @staticmethod
@@ -158,14 +159,16 @@ class Portfolio:
             Dictionary with keys "noise", "market", and "meso" for their 
             respective risk fractions.
         """
+        T, N = returns_window.shape
         corr = returns_window.corr().values
+
         eigvals, _ = np.linalg.eigh(corr)
         eigvals = np.sort(eigvals)
 
-        
-        T, N = returns_window.shape
-        lambda_max = 1 * (1 + np.sqrt(N/T))**2 # Marcenko-Pastur distribution
-        lambda_1 = np.max(eigvals) # market eigval
+        Q = T / N
+        lambda_1 = eigvals[-1]
+        sigma2 = 1 - lambda_1 / N
+        lambda_max = sigma2 * (1 + 1 / np.sqrt(Q))**2
 
         noise = eigvals[eigvals <= lambda_max]
         market = np.array([lambda_1])
