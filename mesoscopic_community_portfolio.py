@@ -26,6 +26,8 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+import seaborn as sns
 import matplotlib.pyplot as plt
 
 from portfolio import Portfolio
@@ -101,6 +103,9 @@ plt.tight_layout()
 plt.savefig(dir_fig + 'meso_corr_spectrum.png')
 plt.show()
 
+# %% [markdown]
+# ## Community
+
 # %%
 # calculate cumulative risks
 risks = portfolio.rolling_cumulative_risk(window=252, step=1)
@@ -115,13 +120,42 @@ plt.legend(title='Component')
 plt.savefig(dir_fig + 'meso_corr_rolling.png')
 plt.show()
 
-# %% [markdown]
-# ## Community
-
 # %%
-for i in ('Louvain', 'Label', 'Kmean'):
-    portfolio.community_discover(algo = i)
-    portfolio.plot_communities_pie(title = i)
+# portfolio = Portfolio(price_data, dict(zip(sectors['Symbol'], sectors['Sector'])))
+for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Kmean'):
+    # discover community
+    portfolio.community_detection(algo)
+    df = pd.DataFrame({'community': portfolio.communities, 'sector': portfolio.sectors})
+    df = pd.pivot_table(df, index='sector', columns='community', aggfunc='size').fillna(0)
+    df.columns = df.columns.astype(int)
+    
+    # create subplots
+    ncols = 3
+    nrows = int(np.ceil(df.shape[1] / ncols))
+    fig, axs = plt.subplots(nrows, ncols, figsize=(15, nrows*5))
+    axs = axs.flatten()
+    for j in range(df.shape[1] , len(axs)): fig.delaxes(axs[j])
+    
+    # plot pies charts
+    for i, col in enumerate(df.columns):
+        wedges, texts, autotexts = axs[i].pie(
+            df[col], labels=None, startangle=90,
+            autopct=lambda x: f'{x:.0f}%' if x >= 10 else '',
+            colors=plt.cm.tab10.colors + ((1, 0.87, 0.13),),
+            wedgeprops=dict(edgecolor='white', linewidth=1.5),
+            textprops=dict(color='white', fontsize=12, fontweight='bold'),
+        )
+        axs[i].set_title(f'Community {col}')
+
+    # figure clean-up
+    if algo in ('Louvain', 'Label Propagation'):
+        algo_full = algo + ' Community Detection'
+    else:
+        algo_full = algo + ' Clustering'
+    fig.suptitle(f'Communities Identifed by \n{algo_full}\n')
+    fig.legend(df.index, title='GICS Sector', loc='lower center', ncol=4)
+    plt.tight_layout()
+    plt.savefig(dir_fig + f'communities_{algo}.png')
     plt.show()
 
 # %% [markdown]
@@ -144,7 +178,7 @@ weights_dict = {}
 #alg_list = ["Louvain", "Label", "Kmean", "DBSCAN", "GMV"]
 alg_list = ["Louvain", "Label", "Kmean", "DBSCAN"]
 for alg in alg_list: 
-    communities = portfolio.community_discover(algo=alg)
+    communities = portfolio.community_detection(algo=alg)
     weights = portfolio.portfolio_building(community=True, algo=alg)
     weights_dict[alg] = weights
 weights_dict['GMV'] = portfolio.portfolio_building(community=False)

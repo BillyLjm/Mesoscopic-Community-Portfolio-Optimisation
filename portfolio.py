@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import networkx as nx
 import cvxpy as cp
 
 import warnings
@@ -11,7 +10,9 @@ from collections import Counter, defaultdict
 
 import matplotlib.pyplot as plt
 
-from sklearn.cluster import KMeans, DBSCAN
+import networkx as nx
+from networkx.algorithms.community import louvain_communities, fast_label_propagation_communities
+from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
 from sklearn.metrics import pairwise_distances
 
 class Portfolio:
@@ -40,8 +41,7 @@ class Portfolio:
 
         # Laloux filter
         self.mesoscopic_filter()
-
-        self.communities = None
+        self.community_detection()
         self.weight = None
 
     ##########################
@@ -113,8 +113,16 @@ class Portfolio:
         eigvals = eigvals[filt]
         eigvecs = eigvecs[:,filt]
         # reconstruct mesoscopic correlation & covariance
-        self.corr_g =  eigvecs @ np.diag(eigvals) @ eigvecs.T
-        self.cov_g = np.diag(self.stddev) @ self.corr_g @ np.diag(self.stddev)
+        tickers = self.returns.columns
+        corr_g = eigvecs @ np.diag(eigvals) @ eigvecs.T
+        self.corr_g =  pd.DataFrame(
+            eigvecs @ np.diag(eigvals) @ eigvecs.T, 
+            index=tickers, columns=tickers
+        )
+        self.cov_g = pd.DataFrame(
+            np.diag(self.stddev) @ self.corr_g @ np.diag(self.stddev),
+            index=tickers, columns=tickers
+        )
 
         return self.corr_g
 
@@ -172,228 +180,72 @@ class Portfolio:
     #######################
 
     @staticmethod
-    def _commu_to_list(G, communities):
+    def _communities_to_labels(communities, n_nodes):
         """
-        Convert a community assignment to a list of labels indexed by nodes.
-
-        Parameters
-        ----------
-        G : networkx.Graph
-            Asset graph.
-        communities : list of lists
-            Community structure as returned by community detection algorithms.
-
-        Returns
-        -------
-        list of int
-            List of community labels, index-aligned with nodes.
+        Convert community assignments into a node-indexed label list.
         """
-        node_to_comm = {}
-        for comm_id, nodes in enumerate(communities):
-            for node in nodes:
-                node_to_comm[node] = comm_id
-        n_assets = len(G.nodes)
-        communities = [node_to_comm[i] for i in range(n_assets)]
-        return communities
-
-    @staticmethod
-    def kmeans_C_g(C_g, n_clusters):
-        """
-        Cluster assets using KMeans on the filtered correlation/covariance matrix.
-
-        Parameters
-        ----------
-        C_g : np.ndarray
-            Filtered correlation/covariance matrix.
-        n_clusters : int
-            Number of clusters to form.
-
-        Returns
-        -------
-        np.ndarray
-            Array of cluster labels.
-        """
-        labels = KMeans(n_clusters=n_clusters, random_state=0).fit_predict(C_g)
+        labels = [-1,] * n_nodes
+        for i, comm in enumerate(communities):
+            for node in comm: labels[node] = i
         return labels
 
-    @staticmethod
-    def DBSCAN_Cg(C_g, returns, eps=0.5, min_samples=5, metric='precomputed'):
+    def community_detection(self, algo="Louvain", **kwargs):
         """
-        Cluster assets using DBSCAN on the mesoscopic representation.
+        Detect asset communities using various algorithms.
 
         Parameters
         ----------
-        C_g : np.ndarray
-            Filtered correlation/covariance matrix.
-        returns : pd.DataFrame or np.ndarray
-            Asset returns matrix.
-        eps : float, optional
-            DBSCAN eps parameter. Default is 0.5.
-        min_samples : int, optional
-            DBSCAN min_samples parameter. Default is 5.
-        metric : str, optional
-            Metric for pairwise distance. Default is 'precomputed'.
-
-        Returns
-        -------
-        np.ndarray
-            Array of cluster labels.
-        """
-        X = (returns @ C_g).T
-        dist = pairwise_distances(X, metric='correlation')
-        labels = DBSCAN(eps=eps, min_samples=min_samples, metric=metric).fit_predict(dist)
-        return labels
-
-    @staticmethod
-    def sector_to_label(list_sector):
-        """
-        Map sector names to integer labels.
-
-        Parameters
-        ----------
-        list_sector : list of str
-            List of sectors.
-
-        Returns
-        -------
-        list of int
-            Corresponding integer labels for each sector.
-        """
-        labels, uniques = pd.factorize(list_sector)
-        return labels.tolist()
-
-    def community_discover(self, algo = "Louvain", seed = 42, **kwargs):
-        """
-        Discover asset communities using various algorithms.
-
-        Parameters
-        ----------
-        algo : {'Louvain', 'Label', 'Kmean', 'DBSCAN', 'Sector'}, optional
+        algo : {'Louvain','Label','Agglo','DBSCAN','Kmean','Sector'}, optional
             Algorithm to use for community detection. Default is "Louvain".
-        seed : int, optional
-            Random seed for community detection, where applicable.
         **kwargs :
-            Additional keyword arguments for clustering algorithms
+            Additional keyword arguments for each algorithm above
 
         Returns
         -------
         list or np.ndarray
             Community labels for each asset.
-
-        Raises
-        ------
-        ValueError
-            If the mesoscopic structure is not computed, or an algorithm name is invalid.
         """
-        if self.C_g is None:
-            raise ValueError("No Mesoscopic structure found, please run mesoscopic_filter")
-        G = nx.from_numpy_array(self.C_g)
-        if algo == "Louvain":
-            communities = nx.community.louvain_communities(G, seed=seed, weight='weight')
-            self.communities = self._commu_to_list(G, communities)
-        elif algo == "Label":
-                    communities = list(nx.community.fast_label_propagation_communities(G, weight='weight',seed = seed))
-                    self.communities = self._commu_to_list(G, communities)
-        elif algo == "Kmean":
-                    n_clusters = kwargs.get("n_clusters", 5)
-                    self.communities = self.kmeans_C_g(self.C_g, n_clusters)
-        elif algo == "DBSCAN":
-                    min_samples = kwargs.get("min_samples", 20)
-                    eps = kwargs.get("eps", 0.5)
-                    metric = kwargs.get("metric", "precomputed")
-                    self.communities = self.DBSCAN_Cg(returns = self.returns, C_g = self.C_g, eps = eps, min_samples = min_samples, metric = metric)
-        elif algo == "Sector":
-             self.communities = self.sector_to_label(self.sector)
+        # Louvain community detection
+        if algo == 'Louvain':
+            kwargs['weight'] = 'weight'
+            G = nx.from_numpy_array(self.corr_g.values)
+            comm = louvain_communities(G, **kwargs)
+            labels = self._communities_to_labels(comm, len(G.nodes))
+            self.communities = dict(zip(self.corr_g.index, labels))
+        # Label propagation community detection
+        elif algo == 'Label Propagation':
+            kwargs['weight'] = 'weight'
+            G = nx.from_numpy_array(self.corr_g.values)
+            comm = fast_label_propagation_communities(G, **kwargs)
+            labels = self._communities_to_labels(comm, len(G.nodes))
+            self.communities = dict(zip(self.corr_g.index, labels))
+        # Agglomerative clustering
+        elif algo == 'Agglomerative':
+            kwargs['metric'] = 'precomputed'
+            kwargs.setdefault('linkage', 'average')
+            labels = AgglomerativeClustering(**kwargs).fit_predict(1 - self.corr_g.values)
+            self.communities = dict(zip(self.corr_g.index, labels))
+        # DBSCAN clustering
+        elif algo == 'DBSCAN':
+            kwargs['metric'] = 'precomputed'
+            kwargs.setdefault('eps', 0.8)
+            labels = DBSCAN(**kwargs).fit_predict(1 - self.corr_g.values)
+            labels = [x if x != -1 else None for x in labels]
+            self.communities = dict(zip(self.corr_g.index, labels))
+        # k-means clustering
+        elif algo == 'Kmean':
+            kwargs['n_clusters'] = 5
+            labels = KMeans(**kwargs).fit_predict(self.corr_g.values)
+            self.communities = dict(zip(self.corr_g.index, labels))
+        # GICS sector
+        elif algo == 'Sector':
+            labels, _ = pd.factorize(self.sector)
+            self.communities = dict(zip(self.corr_g.index, labels))
+        # else raise error
         else:
-            raise ValueError("Select correct algorithm for community discover")
-
+            raise ValueError('Select correct algorithm for community discover')
 
         return self.communities
-
-    def plot_communities_pie(self, title = 'Louvain'):
-        """
-        Plot a pie chart breakdown of sector compositions within detected asset communities.
-
-        Parameters
-        ----------
-        title : str, optional
-            Title for the plot. Default is 'Louvain'.
-
-        Raises
-        ------
-        ValueError
-            If communities have not been discovered.
-        """
-        if self.communities is None:
-            raise ValueError("No communities found, please run community_discover")
-        comm2sectors = defaultdict(list)
-        for asset_idx, comm_id in enumerate(self.communities):
-            comm2sectors[comm_id].append(self.sector[asset_idx])
-
-        sector_labels = sorted(set(self.sector))
-        colors = [
-            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#ffd700'
-        ]
-        sector_color_dict = dict(zip(sector_labels, colors))
-
-        n_communities = len(comm2sectors)
-        n_cols = min(n_communities, 3)
-        n_rows = (n_communities + n_cols - 1) // n_cols
-
-        fig, axs = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows))
-        axs = axs.flatten() if n_communities > 1 else [axs]
-        num_com = 1
-        for i, (comm_id, sectors) in enumerate(comm2sectors.items()):
-
-            ax = axs[i]
-            count = Counter(sectors)
-            sizes = [count.get(s, 0) for s in sector_labels]
-            total = sum(sizes)
-            sizes = [s / total for s in sizes] if total > 0 else [0] * len(sizes)
-
-            # Explode: separa le fette grandi per leggibilità
-            explode = [0.05 if s > 0.15 else 0 for s in sizes]
-
-            wedges, texts, autotexts = ax.pie(
-                sizes,
-                colors=[sector_color_dict[s] for s in sector_labels],
-                startangle=90,
-                wedgeprops=dict(edgecolor='white'),
-                autopct=lambda p: f'{p:.1f}%' if p > 3 else '',
-                pctdistance=0.8,
-                labeldistance=1.1,
-                explode=explode
-            )
-
-            for text in autotexts:
-                text.set_fontsize(12)
-                text.set_horizontalalignment('center')
-                text.set_verticalalignment('center')
-                text.set_weight('bold')
-
-            ax.set_title(f"Community {num_com}", fontsize=14)
-            num_com += 1
-            ax.axis('equal')
-
-        fig.suptitle(f"Community Searching Algorithm {title}", fontsize = 14)
-
-
-        for j in range(i + 1, len(axs)):
-            axs[j].axis('off')
-
-
-        fig.legend(
-            handles=[plt.Line2D([0], [0], marker='o', color='w', label=lab,
-                markerfacecolor=sector_color_dict[lab], markersize=10)
-            for lab in sector_labels],
-            loc='lower center',
-            ncol=min(len(sector_labels), 5),
-            bbox_to_anchor=(0.5, -0.05),
-            title = 'Sector'
-        )
-        plt.tight_layout()
-        plt.show()
 
     @staticmethod
     def solve_gmv(cov_g, short = False):
@@ -500,7 +352,7 @@ class Portfolio:
         short : bool, optional
             If False, impose no short-selling (weights >= 0). Default is False.
         algo : str, optional
-            Community detection algorithm; passed to `community_discover`.
+            Community detection algorithm; passed to `community_detection`.
         min_samples : int, optional
             Used for DBSCAN. Default is 5.
         eps : float, optional
@@ -532,7 +384,7 @@ class Portfolio:
         if use_community:
             self.mesoscopic_filter()
             algo = kwargs.pop("algo", "Louvain")
-            self.communities = self.community_discover(algo = algo, seed = seed, **kwargs)
+            self.communities = self.community_detection(algo = algo, seed = seed, **kwargs)
             self.w = self.solve_gmv_community(self.cov_g,self.communities, short = short)
         elif is_equal:
              self.w = np.ones(len(self.returns.columns)) * 1 / len(self.returns.columns)
