@@ -22,9 +22,28 @@ class Portfolio:
     Parameters
     ----------
     price_data : pd.DataFrame
-        Price data with tickers as columns and timesteps as rows.
+        Price data with tickers as columns and time-steps as rows.
     sectors : dictionary
         Maps from ticker to sector.
+
+    Attributes
+    ----------
+    price_data : pd.DataFrame
+        As given in parameters
+    sectors : dict
+        As given in parameters
+    returns : pd.DataFrame
+        Percentage returns per time-step
+    stddev : pd.Series
+        Standard deviation of asset returns.
+    corr : pd.DataFrame
+        Correlation between asset returns, after Laloux's correction
+    cov : pd.DataFrame
+        Covariance between asset returns, after Laloux's correction
+    communities : dict
+        Mapping from ticker to detected community label.
+    weights : pd.Series
+        Optimized portfolio weights from the GMV portfolio construction.
     """
     def __init__(self, price_data, sectors):
         # filter inner join of price_data and sectors
@@ -40,9 +59,9 @@ class Portfolio:
         self.stddev = self.returns.std()
 
         # Laloux filter
-        self.mesoscopic_filter()
-        self.community_detection()
-        self.weight = None
+        self.corr, self.cov = self.mesoscopic_filter()
+        self.communities = self.community_detection()
+        self.weights = self.gmv_portfolio()
 
     ##########################
     # Mesoscopic Correlation #
@@ -114,17 +133,17 @@ class Portfolio:
         eigvecs = eigvecs[:,filt]
         # reconstruct mesoscopic correlation & covariance
         tickers = self.returns.columns
-        corr_g = eigvecs @ np.diag(eigvals) @ eigvecs.T
-        self.corr_g =  pd.DataFrame(
+        corr = eigvecs @ np.diag(eigvals) @ eigvecs.T
+        self.corr =  pd.DataFrame(
             eigvecs @ np.diag(eigvals) @ eigvecs.T, 
             index=tickers, columns=tickers
         )
-        self.cov_g = pd.DataFrame(
-            np.diag(self.stddev) @ self.corr_g @ np.diag(self.stddev),
+        self.cov = pd.DataFrame(
+            np.diag(self.stddev) @ self.corr.values @ np.diag(self.stddev),
             index=tickers, columns=tickers
         )
 
-        return self.corr_g
+        return self.corr, self.cov
 
     def cumulative_risk(self, start=None, end=None):
         """
@@ -202,193 +221,92 @@ class Portfolio:
 
         Returns
         -------
-        list or np.ndarray
-            Community labels for each asset.
+        dict
+            Dictionary mapping asset ticker to identified community (0,1,2,...)
         """
         # Louvain community detection
         if algo == 'Louvain':
             kwargs['weight'] = 'weight'
-            G = nx.from_numpy_array(self.corr_g.values)
+            G = nx.from_numpy_array(self.corr.values)
             comm = louvain_communities(G, **kwargs)
             labels = self._communities_to_labels(comm, len(G.nodes))
-            self.communities = dict(zip(self.corr_g.index, labels))
+            self.communities = dict(zip(self.corr.index, labels))
         # Label propagation community detection
         elif algo == 'Label Propagation':
             kwargs['weight'] = 'weight'
-            G = nx.from_numpy_array(self.corr_g.values)
+            G = nx.from_numpy_array(self.corr.values)
             comm = fast_label_propagation_communities(G, **kwargs)
             labels = self._communities_to_labels(comm, len(G.nodes))
-            self.communities = dict(zip(self.corr_g.index, labels))
+            self.communities = dict(zip(self.corr.index, labels))
         # Agglomerative clustering
         elif algo == 'Agglomerative':
             kwargs['metric'] = 'precomputed'
             kwargs.setdefault('linkage', 'average')
-            labels = AgglomerativeClustering(**kwargs).fit_predict(1 - self.corr_g.values)
-            self.communities = dict(zip(self.corr_g.index, labels))
+            labels = AgglomerativeClustering(**kwargs).fit_predict(1 - self.corr.values)
+            self.communities = dict(zip(self.corr.index, labels))
         # DBSCAN clustering
         elif algo == 'DBSCAN':
             kwargs['metric'] = 'precomputed'
             kwargs.setdefault('eps', 0.8)
-            labels = DBSCAN(**kwargs).fit_predict(1 - self.corr_g.values)
-            labels = [x if x != -1 else None for x in labels]
-            self.communities = dict(zip(self.corr_g.index, labels))
+            labels = DBSCAN(**kwargs).fit_predict(1 - self.corr.values)
+            self.communities = dict(zip(self.corr.index, labels))
         # k-means clustering
         elif algo == 'Kmean':
             kwargs['n_clusters'] = 5
-            labels = KMeans(**kwargs).fit_predict(self.corr_g.values)
-            self.communities = dict(zip(self.corr_g.index, labels))
+            labels = KMeans(**kwargs).fit_predict(self.corr.values)
+            self.communities = dict(zip(self.corr.index, labels))
         # GICS sector
         elif algo == 'Sector':
-            labels, _ = pd.factorize(self.sector)
-            self.communities = dict(zip(self.corr_g.index, labels))
+            labels, _ = pd.factorize(np.array(list(self.sectors.values())))
+            self.communities = dict(zip(self.corr.index, labels))
+        # No communities
+        elif algo == None:
+            self.communities = dict(zip(self.corr.index, range(len(corr))))
         # else raise error
         else:
             raise ValueError('Select correct algorithm for community discover')
 
+        self.gmv_portfolio() # re-optimise portfolio
         return self.communities
 
-    @staticmethod
-    def solve_gmv(cov_g, short = False):
+    ##########################
+    # Portfolio Optimisation #
+    ##########################
+
+    def gmv_portfolio(self, short=False):
         """
-        Compute the Global Minimum Variance (GMV) portfolio for a given covariance matrix.
+        Compute the Global Minimum Variance (GMV) portfolio at the community level.
+        This allocates equal weight within clusters, calculates the inter-cluster
+        covariance, and optimises the cluster weights to minimise portfolio variance.
 
         Parameters
         ----------
-        cov_g : np.ndarray
-            Asset covariance matrix.
-        short : bool, optional
-            If False, impose no short-selling (weights >= 0). Default is False.
+        short : bool, optional, default=False
+            Indicates if short-selling is allowed (weights may be negative).
 
         Returns
         -------
-        np.ndarray
-            Optimal portfolio weights.
+        dict
+            Dictionary mapping identified community to GMV portfolio weight
         """
-        N = cov_g.shape[0]
-        w = cp.Variable(N)
-        objective = cp.Minimize(cp.quad_form(w, cov_g))
+        # aggregate correlation matrices by sector
+        wts = self.cov.columns.map(self.communities)
+        tmp = np.eye(np.max(wts)+1)
+        wts = np.array([tmp[i] for i in wts])
+        corr_comm = wts.T @ self.cov.values @ wts
+
+        # GMV optimise
+        w = cp.Variable(corr_comm.shape[0])
+        objective = cp.Minimize(cp.quad_form(w, corr_comm))
         if short:
             constraints = [cp.sum(w) == 1]
         else:
-            constraints = [cp.sum(w) == 1,  w >= 0 ]
+            constraints = [cp.sum(w) == 1,  w >= 0]
         problem = cp.Problem(objective, constraints)
         problem.solve()
-        return w.value
 
-    @staticmethod
-    def solve_gmv_community(cov_g, community_labels, short=False):
-        """
-        Compute the Global Minimum Variance (GMV) portfolio with community aggregation.
-
-        Parameters
-        ----------
-        cov_g : np.ndarray
-            Asset covariance matrix.
-        community_labels : list or np.ndarray
-            Community label for each asset.
-        short : bool, optional
-            If False, impose no short-selling (weights >= 0). Default is False.
-
-        Returns
-        -------
-        np.ndarray
-            Optimal portfolio weights, distributed equally within each community.
-        """
-        N = len(community_labels)
-
-        # Ricostruisci: community_id → [asset indices]
-        community_map = defaultdict(list)
-        for idx, c_id in enumerate(community_labels):
-            community_map[c_id].append(idx)
-
-        community_list = list(community_map.values())
-        n = len(community_list)
-
-        Sigma_c = np.zeros((n, n))
-
-        for c in range(n):
-            assets_c = community_list[c]
-            Nc = len(assets_c)
-
-            var_c = np.mean([cov_g[i, i] for i in assets_c])
-            cov_c = np.mean([cov_g[i, j] for i in assets_c for j in assets_c if i != j]) if Nc > 1 else 0
-            Sigma_c[c, c] = var_c + (Nc - 1) * cov_c
-
-            for k in range(c + 1, n):
-                assets_k = community_list[k]
-                cross_cov = np.mean([cov_g[i, j] for i in assets_c for j in assets_k])
-                Sigma_c[c, k] = Sigma_c[k, c] = cross_cov
-
-        W = cp.Variable(n)
-        objective = cp.Minimize(cp.quad_form(W, Sigma_c))
-        if short:
-            constraints = [cp.sum(W) == 1]
-        else:
-            constraints = [cp.sum(W) == 1,  W >= 0 ]
-        prob = cp.Problem(objective, constraints)
-        prob.solve()
-
-        weights = np.zeros(N)
-        for c, Wc in enumerate(W.value):
-            assets_c = community_list[c]
-            Nc = len(assets_c)
-            for i in assets_c:
-                weights[i] = Wc / Nc
-
-        return weights
-
-    def portfolio_building(self, seed=42, **kwargs):
-        """
-        Construct the portfolio weights using selected methodology.
-
-        Parameters
-        ----------
-        seed : int, optional
-            Random seed for reproducibility in community detection. Default is 42.
-        community : bool, optional
-            If True, use community-based GMV optimization. Default is True.
-        is_equal : bool, optional
-            If True, use an equally-weighted portfolio. Default is False.
-        short : bool, optional
-            If False, impose no short-selling (weights >= 0). Default is False.
-        algo : str, optional
-            Community detection algorithm; passed to `community_detection`.
-        min_samples : int, optional
-            Used for DBSCAN. Default is 5.
-        eps : float, optional
-            Used for DBSCAN clustering.
-        metric : str, optional
-            Metric for DBSCAN clustering.
-
-        Returns
-        -------
-        np.ndarray
-            Portfolio weights.
-
-        Raises
-        ------
-        ValueError
-            If both `community` and `is_equal` are True, or if required data is missing.
-        """
-        use_community = kwargs.get("community", True)
-        is_equal = kwargs.get("is_equal", False)
-        if is_equal and use_community:
-             raise ValueError("use_community and is_equal cannot be True at same time ")
-        short = kwargs.get("short", False)
-        algo = kwargs.get("algo", "Louvain")
-        seed = kwargs.get("seed", 42)
-        min_samples = kwargs.get("min_samples", 5)
-        eps = kwargs.get("eps", 0.5)
-        metric = kwargs.get("metric", "precomputed")
-        self.compute_return()
-        if use_community:
-            self.mesoscopic_filter()
-            algo = kwargs.pop("algo", "Louvain")
-            self.communities = self.community_detection(algo = algo, seed = seed, **kwargs)
-            self.w = self.solve_gmv_community(self.cov_g,self.communities, short = short)
-        elif is_equal:
-             self.w = np.ones(len(self.returns.columns)) * 1 / len(self.returns.columns)
-        else:
-            self.cov_g = self.returns.cov().values
-            self.w = self.solve_gmv(self.cov_g, short)
-        return self.w
+        # save optimised weights, and convert back to assets
+        ncomm = Counter(self.communities.values())
+        weights = [w.value[i] / ncomm[i] for i in range(corr_comm.shape[0])]
+        self.weights = dict(map(lambda x: (x[0], weights[x[1]]), self.communities.items()))
+        return self.weights
