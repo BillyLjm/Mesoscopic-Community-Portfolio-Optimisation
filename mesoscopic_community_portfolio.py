@@ -14,15 +14,9 @@
 # ---
 
 # %% [markdown]
-# # Investment Universe
-#
-# We are focused on portfolio optimisation, and not stock picking.\
-# Thus for simplicty, our investment universe will be the current S&P 500 constituents with daily price data from 2000 to 2024.
+# # Mescoscopic Community Portfolio
 
 # %%
-# %load_ext autoreload
-# %autoreload 2
-    
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -30,11 +24,21 @@ import yfinance as yf
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from tqdm import tqdm
+from collections import defaultdict
+
 from portfolio import Portfolio
-from backtest import fine_tuning_k_means, backtest_fun, plot_results_backtest
 
 dir_data = 'data/'
 dir_fig = 'fig/'
+
+# %% [markdown]
+# ## Investment Universe
+#
+# We are focused on portfolio optimisation, and not stock picking.\
+# Thus for simplicty, our investment universe will be the current S&P 500 constituents with daily price data from 2000 to 2024.
+#
+# The code below downloads the relevant data from the internet.
 
 # %%
 # Get current constituents of S&P 500
@@ -50,37 +54,31 @@ prices.to_csv('data/prices.csv')
 
 sp500 = sp500[sp500['Symbol'].isin(prices.columns)]
 sp500 = sp500.sort_values(by='Symbol').reset_index(drop=True)
-sp500.to_csv('data/sp500.csv')
+sp500.to_csv('data/sp500.csv', index=False)
 
 sp500
 
 # %% [markdown]
-# # Mesoscopic Community Portfolio
-
-# %% [markdown]
 # ## Create Porfolio
+#
+# With the data downloaded, we create the Portoflio class which does all the claculations and optimisations.
 
 # %%
-# sectors = pd.read_csv(dir_data + 'SandP500.csv')
-# sectors.head()
-
+# create sector mapping
 sectors = pd.read_csv(dir_data + 'sp500.csv')
-sectors = sectors[['Symbol', 'Security', 'GICS Sector']]
-sectors.columns = ['Symbol', 'Name', 'Sector']
-sectors = sectors.sort_values(by='Symbol').reset_index(drop=True)
-sectors.head()
+sectors = dict(zip(sectors['Symbol'], sectors['GICS Sector']))
 
-# %%
-# price_data =  pd.read_csv(dir_data + 'price_data.csv', index_col=0)
+# read price data
+price_data =  pd.read_csv(dir_data + 'prices.csv', index_col=0)
+price_data.index = pd.to_datetime(price_data.index)
 
-price_data =  pd.read_csv('data/prices.csv', index_col=0)
-price_data.head()
-
-# %%
-portfolio = Portfolio(price_data, dict(zip(sectors['Symbol'], sectors['Sector'])))
+# create portfolio class
+portfolio = Portfolio(price_data, sectors)
 
 # %% [markdown]
 # ## Mesocopic Correlation
+#
+# We applied the Laloux corrections to the correlation matrix to yield the mesoscopic correlation matrix
 
 # %%
 # plot eigenspectrum deomposition
@@ -103,9 +101,6 @@ plt.tight_layout()
 plt.savefig(dir_fig + 'meso_corr_spectrum.png')
 plt.show()
 
-# %% [markdown]
-# ## Community
-
 # %%
 # calculate cumulative risks
 risks = portfolio.rolling_cumulative_risk(window=252, step=1)
@@ -120,8 +115,13 @@ plt.legend(title='Component')
 plt.savefig(dir_fig + 'meso_corr_rolling.png')
 plt.show()
 
+# %% [markdown]
+# ## Community Detection
+#
+# Applying the various algorithms to cluster the stocks together based on the mescoscopic correlation matrix
+
 # %%
-# portfolio = Portfolio(price_data, dict(zip(sectors['Symbol'], sectors['Sector'])))
+# find communities & plot GICS sector composition
 for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Kmean'):
     # discover community
     portfolio.community_detection(algo)
@@ -159,134 +159,66 @@ for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Kmean')
     plt.show()
 
 # %% [markdown]
-# ## Portfolio Building
-
-# %% [markdown]
-# ### Weight Distribution asset
+# ## Back-Testing
+#
+# We optimise the weights between communities to yield the global-minimum-variance (GMV) portfolios, and keep equal weights within portfolios.  
+# These portfolios are then tested using an anchored walk-forward method, with a 1-year testing period, and a 3-year burn-in period
 
 # %%
-# create portfolio class
-num_asset = 50
-price_data_sampled = price_data.sample(n= num_asset, axis=1, random_state=42)
-price_data_sampled = price_data_sampled[sorted(price_data_sampled.columns)]
-returns = price_data_sampled.pct_change().dropna() 
-portfolio = Portfolio(data_csv, price_data = price_data_sampled, returns = returns)
-portfolio.C_g = portfolio.mesoscopic_filter()
-weights_dict = {}
+ret_data = price_data.pct_change()
 
-# Find weights of each portfolio
-#alg_list = ["Louvain", "Label", "Kmean", "DBSCAN", "GMV"]
-alg_list = ["Louvain", "Label", "Kmean", "DBSCAN"]
-for alg in alg_list: 
-    communities = portfolio.community_detection(algo=alg)
-    weights = portfolio.portfolio_building(community=True, algo=alg)
-    weights_dict[alg] = weights
-weights_dict['GMV'] = portfolio.portfolio_building(community=False)
-weights_df = pd.DataFrame(weights_dict, index=price_data_sampled.columns)
+# determine test start dates
+period_test = pd.DateOffset(years=1)
+period_burn = pd.DateOffset(years=3)
+test_dates = pd.date_range(price_data.index.min() + period_burn, 
+                           price_data.index.max() - period_test,
+                           freq=pd.DateOffset(years=1))
 
-# Plot
-labels = weights_df.index.to_list()           
-algorithms = weights_df.columns.to_list()     
-n_algos = len(algorithms)
-x = np.arange(len(labels))                    
-width = 0.15                                  
+# anchored walk-forward
+returns = defaultdict(list)
+reliability = defaultdict(list)
+ncomm = defaultdict(list)
+for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Kmean', 'Sector', 'Equal-Weight', 'None'):
+    pbar = tqdm(test_dates)
+    pbar.set_description(algo)
+    for test_date in pbar:
+        # train portfolio optimisation
+        portfolio = Portfolio(price_data[:test_date], sectors, algo=algo)
+        # calculate returns in test period
+        ret_test = ret_data[test_date:test_date + period_test]
+        wts = ret_test.columns.map(portfolio.weights)
+        ret_test = ret_test @ wts
+        returns[algo].append(ret_test)
+        # calculate reliability (via stdev in train dataset)
+        ret_train = ret_data[:test_date ]
+        wts = ret_train.columns.map(portfolio.weights)
+        ret_train = ret_train @ wts
+        reliability[algo].append(np.abs(np.std(ret_test)/np.std(ret_train) - 1))
+        # remember the number of communities
+        ncomm[algo].append(len(set(portfolio.communities.values())))
+    returns[algo] = pd.concat(returns[algo]) # concat pandas time-series
 
-fig, ax = plt.subplots(figsize=(16, 6))
-for i, algo in enumerate(algorithms):
-    bar_positions = x + (i - n_algos/2) * width + width/2
-    ax.bar(bar_positions, weights_df[algo], width=width, label=algo, edgecolor='black')
+returns = pd.DataFrame(returns)
+reliability = pd.DataFrame(reliability)
+ncomm = pd.DataFrame(ncomm)
+returns.head()
 
-ax.axhline(1/num_asset, color='gray', linestyle='--', linewidth=1.5, label='1/N')
-ax.set_title("Barplot different portfolio weight per algorithm", fontsize=14)
-ax.set_ylabel("Weight", fontsize=12)
-ax.set_xlabel("Asset", fontsize=12)
-ax.set_xticks(x)
-ax.set_xticklabels(labels, rotation=45)
-ax.legend(title="Algorithm")
-plt.tight_layout()
+# %%
+# calculate aggregate metrics
+summary = {}
+summary['Sharpe Ratio'] = returns.mean() / returns.std() * np.sqrt(252)
+summary['Mean Reliability'] = reliability.mean()
+summary['Median Reliability'] = reliability.median()
+summary['Mean Num Communities'] = ncomm.mean()
+summary['Median Num Communities'] = ncomm.median()
+summary = pd.DataFrame(summary)
+summary
+
+# %%
+# plot returns
+cumlogret = np.log((1 + returns).cumprod()) 
+cumlogret.plot()
+plt.axhline(0, color='k')
+plt.title('Cumulative Log Returns')
+plt.ylabel('Log Returns')
 plt.show()
-
-# %% [markdown]
-# ## Back-test
-
-# %% [markdown]
-# ### Fine-Tuning
-
-# %%
-model = ["Louvain", "Label","Kmean","DBSCAN", "Sector","GMV", "Equal"]
-results = {}
-for m in model:
-    print(f"====== Start {m} ======")
-    portfolio = Portfolio(data_csv, price_data = price_data)
-    results[f"{m}"] = backtest_fun(portfolio, train_months = 36 , burn_period_month  = 6, test_months =18, model = m, short = False, verbose = True, fine_tuning = True)
-
-method_labels = {
-        "Louvain": "Mesoscopic community - Louvain",
-        "Label": "Mesoscopic community - Label",
-        "Kmean": "Mesoscopic community - Kmean",
-        "DBSCAN": "Mesoscopic community - DBSCAN",
-        "Sector": "Sector community",
-        "GMV": "GMV",
-        "Equal": "1/N"
-    }
-
-markers = {
-        "Louvain": "*",
-        "Label": "D",
-        "Kmean": "s",
-        "DBSCAN": "<",
-        "Sector": "^",
-        "GMV": "p",
-        "Equal": "X"
-    }
-
-colors = {
-        "Louvain": "red",
-        "Label": "purple",
-        "Kmean": "black",
-        "DBSCAN": "orange",
-        "Sector": "grey",
-        "GMV": "blue",
-        "Equal": "green"
-    }
-
-summary_df = plot_results_backtest(results, method_labels, markers, colors)
-
-# %%
-model = ["Louvain", "Label", "Kmean", "DBSCAN", "Sector","GMV", "Equal"]
-results_short = {}
-for m in model:
-    print(f"====== Start {m} ======")
-    portfolio = Portfolio(data_csv, price_data = price_data)
-    results_short[f"{m}"] = backtest_fun(portfolio, train_months = 36 , burn_period_month  = 6, test_months =18, model = m, short = True, verbose = True, fine_tuning = True)
-method_labels = {
-        "Louvain": "Mesoscopic community - Louvain",
-        "Label": "Mesoscopic community - Label",
-        "Kmean": "Mesoscopic community - Kmean",
-        "DBSCAN": "Mesoscopic community - DBSCAN",
-        "Sector": "Sector community",
-        "GMV": "GMV",
-        "Equal": "1/N"
-    }
-
-markers = {
-        "Louvain": "*",
-        "Label": "D",
-        "Kmean": "s",
-        "DBSCAN": "<",
-        "Sector": "^",
-        "GMV": "p",
-        "Equal": "X"
-    }
-
-colors = {
-        "Louvain": "red",
-        "Label": "purple",
-        "Kmean": "black",
-        "DBSCAN": "orange",
-        "Sector": "grey",
-        "GMV": "blue",
-        "Equal": "green"
-    }
-
-summary_df_short = plot_results_backtest(results_short, method_labels, markers, colors)

@@ -6,9 +6,7 @@ import warnings
 from tqdm import tqdm
 from tqdm_joblib import tqdm_joblib
 from joblib import Parallel, delayed
-from collections import Counter, defaultdict
-
-import matplotlib.pyplot as plt
+from collections import Counter
 
 import networkx as nx
 from networkx.algorithms.community import louvain_communities, fast_label_propagation_communities
@@ -45,7 +43,7 @@ class Portfolio:
     weights : pd.Series
         Optimized portfolio weights from the GMV portfolio construction.
     """
-    def __init__(self, price_data, sectors):
+    def __init__(self, price_data, sectors, algo='Louvain'):
         # filter inner join of price_data and sectors
         tmp = set(price_data.columns) - set(sectors.keys())
         if len(tmp) > 0:
@@ -60,7 +58,7 @@ class Portfolio:
 
         # Laloux filter
         self.corr, self.cov = self.mesoscopic_filter()
-        self.communities = self.community_detection()
+        self.communities = self.community_detection(algo)
         self.weights = self.gmv_portfolio()
 
     ##########################
@@ -135,7 +133,7 @@ class Portfolio:
         tickers = self.returns.columns
         corr = eigvecs @ np.diag(eigvals) @ eigvecs.T
         self.corr =  pd.DataFrame(
-            eigvecs @ np.diag(eigvals) @ eigvecs.T, 
+            eigvecs @ np.diag(eigvals) @ eigvecs.T,
             index=tickers, columns=tickers
         )
         self.cov = pd.DataFrame(
@@ -208,7 +206,7 @@ class Portfolio:
             for node in comm: labels[node] = i
         return labels
 
-    def community_detection(self, algo="Louvain", **kwargs):
+    def community_detection(self, algo='Louvain', **kwargs):
         """
         Detect asset communities using various algorithms.
 
@@ -249,6 +247,7 @@ class Portfolio:
             kwargs['metric'] = 'precomputed'
             kwargs.setdefault('eps', 0.8)
             labels = DBSCAN(**kwargs).fit_predict(1 - self.corr.values)
+            labels += 1 # -1 label lumped into 1 cl
             self.communities = dict(zip(self.corr.index, labels))
         # k-means clustering
         elif algo == 'Kmean':
@@ -259,9 +258,13 @@ class Portfolio:
         elif algo == 'Sector':
             labels, _ = pd.factorize(np.array(list(self.sectors.values())))
             self.communities = dict(zip(self.corr.index, labels))
+        elif algo == 'Equal-Weight':
+            labels = [0,] * self.corr.shape[0]
+            self.communities = dict(zip(self.corr.index, labels))
         # No communities
-        elif algo == None:
-            self.communities = dict(zip(self.corr.index, range(len(corr))))
+        elif algo == 'None':
+            labels = range(self.corr.shape[0])
+            self.communities = dict(zip(self.corr.index, labels))
         # else raise error
         else:
             raise ValueError('Select correct algorithm for community discover')
