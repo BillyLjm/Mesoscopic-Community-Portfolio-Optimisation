@@ -249,11 +249,6 @@ class Portfolio:
             labels = DBSCAN(**kwargs).fit_predict(1 - self.corr.values)
             labels += 1 # -1 label lumped into 1 cl
             self.communities = dict(zip(self.corr.index, labels))
-        # k-means clustering
-        elif algo == 'Kmean':
-            kwargs['n_clusters'] = 5
-            labels = KMeans(**kwargs).fit_predict(self.corr.values)
-            self.communities = dict(zip(self.corr.index, labels))
         # GICS sector
         elif algo == 'Sector':
             labels, _ = pd.factorize(np.array(list(self.sectors.values())))

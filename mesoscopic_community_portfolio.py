@@ -122,7 +122,7 @@ plt.show()
 
 # %%
 # find communities & plot GICS sector composition
-for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Kmean'):
+for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN'):
     # discover community
     portfolio.community_detection(algo)
     df = pd.DataFrame({'community': portfolio.communities, 'sector': portfolio.sectors})
@@ -178,7 +178,7 @@ test_dates = pd.date_range(price_data.index.min() + period_burn,
 returns = defaultdict(list)
 reliability = defaultdict(list)
 ncomm = defaultdict(list)
-for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Kmean', 'Sector', 'Equal-Weight', 'None'):
+for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Sector', 'Equal-Weight', 'None'):
     pbar = tqdm(test_dates)
     pbar.set_description(algo)
     for test_date in pbar:
@@ -212,6 +212,7 @@ summary['Median Reliability'] = reliability.median()
 summary['Mean Num Communities'] = ncomm.mean()
 summary['Median Num Communities'] = ncomm.median()
 summary = pd.DataFrame(summary)
+summary.to_csv(dir_fig + 'sumamry.csv')
 summary
 
 # %%
@@ -221,4 +222,5 @@ cumlogret.plot()
 plt.axhline(0, color='k')
 plt.title('Cumulative Log Returns')
 plt.ylabel('Log Returns')
+plt.savefig(dir_fig + 'cum_returns.png')
 plt.show()
