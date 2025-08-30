@@ -159,7 +159,7 @@ for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN'):
     plt.show()
 
 # %% [markdown]
-# ## Back-Testing
+# ## Back-Testing (1 Year)
 #
 # We optimise the weights between communities to yield the global-minimum-variance (GMV) portfolios, and keep equal weights within portfolios.  
 # These portfolios are then tested using an anchored walk-forward method, with a 1-year testing period, and a 3-year burn-in period
@@ -172,7 +172,7 @@ period_test = pd.DateOffset(years=1)
 period_burn = pd.DateOffset(years=3)
 test_dates = pd.date_range(price_data.index.min() + period_burn, 
                            price_data.index.max() - period_test,
-                           freq=pd.DateOffset(years=1))
+                           freq=period_test)
 
 # anchored walk-forward
 returns = defaultdict(list)
@@ -212,7 +212,7 @@ summary['Median Reliability'] = reliability.median()
 summary['Mean Num Communities'] = ncomm.mean()
 summary['Median Num Communities'] = ncomm.median()
 summary = pd.DataFrame(summary)
-summary.to_csv(dir_fig + 'sumamry.csv')
+summary.to_csv(dir_fig + 'summary_1yr.csv')
 summary
 
 # %%
@@ -224,3 +224,60 @@ plt.title('Cumulative Log Returns')
 plt.ylabel('Log Returns')
 plt.savefig(dir_fig + 'cum_returns.png')
 plt.show()
+
+# %% [markdown]
+# ## Back-Testing (10 Year)
+#
+# We optimise the weights between communities to yield the global-minimum-variance (GMV) portfolios, and keep equal weights within portfolios.  
+# These portfolios are then tested using an anchored walk-forward method, with a 10-year testing period, and a 3-year burn-in period
+
+# %%
+ret_data = price_data.pct_change()
+
+# determine test start dates
+period_test = pd.DateOffset(years=10)
+period_burn = pd.DateOffset(years=3)
+test_dates = pd.date_range(price_data.index.min() + period_burn, 
+                           price_data.index.max() - period_test,
+                           freq=period_test)
+
+# anchored walk-forward
+returns = defaultdict(list)
+reliability = defaultdict(list)
+ncomm = defaultdict(list)
+for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Sector', 'Equal-Weight', 'None'):
+    pbar = tqdm(test_dates)
+    pbar.set_description(algo)
+    for test_date in pbar:
+        # train portfolio optimisation
+        portfolio = Portfolio(price_data[:test_date], sectors, algo=algo)
+        # calculate returns in test period
+        ret_test = ret_data[test_date:test_date + period_test]
+        wts = ret_test.columns.map(portfolio.weights)
+        ret_test = ret_test @ wts
+        returns[algo].append(ret_test)
+        # calculate reliability (via stdev in train dataset)
+        ret_train = ret_data[:test_date ]
+        wts = ret_train.columns.map(portfolio.weights)
+        ret_train = ret_train @ wts
+        reliability[algo].append(np.abs(np.std(ret_test)/np.std(ret_train) - 1))
+        # remember the number of communities
+        ncomm[algo].append(len(set(portfolio.communities.values())))
+    returns[algo] = pd.concat(returns[algo]) # concat pandas time-series
+
+returns = pd.DataFrame(returns)
+reliability = pd.DataFrame(reliability)
+ncomm = pd.DataFrame(ncomm)
+returns.head()
+
+# %%
+# calculate aggregate metrics
+summary = {}
+summary['Sharpe Ratio'] = returns.mean() / returns.std() * np.sqrt(252)
+summary['Mean Reliability'] = reliability.mean()
+summary['Median Reliability'] = reliability.median()
+summary['Mean Num Communities'] = ncomm.mean()
+summary['Median Num Communities'] = ncomm.median()
+summary = pd.DataFrame(summary)
+summary.to_csv(dir_fig + 'summary_10yr.csv')
+summary
