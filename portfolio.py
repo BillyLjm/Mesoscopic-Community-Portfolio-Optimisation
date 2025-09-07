@@ -239,15 +239,15 @@ class Portfolio:
         # Agglomerative clustering
         elif algo == 'Agglomerative':
             kwargs['metric'] = 'precomputed'
-            kwargs.setdefault('linkage', 'average')
+            kwargs.setdefault('n_clusters', 5)
+            kwargs.setdefault('linkage', 'single')
             labels = AgglomerativeClustering(**kwargs).fit_predict(1 - self.corr.values)
             self.communities = dict(zip(self.corr.index, labels))
         # DBSCAN clustering
         elif algo == 'DBSCAN':
             kwargs['metric'] = 'precomputed'
-            kwargs.setdefault('eps', 0.8)
+            kwargs.setdefault('eps', 0.86)
             labels = DBSCAN(**kwargs).fit_predict(1 - self.corr.values)
-            labels += 1 # -1 label lumped into 1 cl
             self.communities = dict(zip(self.corr.index, labels))
         # GICS sector
         elif algo == 'Sector':
