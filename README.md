@@ -43,13 +43,15 @@ The approach is intended for equity or asset universes where noisy sample correl
 
 Attributes filled during init (and refreshable by calling corresponding methods):
 
-- `price_data` — dataframe of asset prices (aligned with sectors keys
-- `returns` — pct_change() of price_data
+- `price_data` — dataframe of asset prices aligned with sectors keys  (pd.DataFrame)
+- `returns` — pct_change() of price_data (pd.Series)
 - `stddev` — per-asset volatility (sample std)
 - `corr` — mesoscopic correlation (pd.DataFrame)
 - `cov` — mesoscopic covariance (pd.DataFrame)
-- `communities` — dict ticker -> community label
-- `weights` — dict ticker -> portfolio weight
+- `corr_comm` — correlation between communities (pd.DataFrame)
+- `cov_comm` — covariance between communities (pd.DataFrame)
+- `communities` — maps ticker to community label (dictionary)
+- `weights` — maps ticker to optimised portfolio weight (dictionary)
 
 ### mesoscopic_community_portfolio.ipynb
 

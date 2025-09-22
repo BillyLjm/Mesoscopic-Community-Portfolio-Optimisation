@@ -158,6 +158,17 @@ for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN'):
     plt.savefig(dir_fig + f'communities_{algo}.png')
     plt.show()
 
+# %%
+# find communities & plot GICS sector composition
+for algo in ('Louvain', 'Label Propagation', 'Agglomerative', 'DBSCAN', 'Sector', 'None'):
+    portfolio.community_detection(algo)
+    sns.heatmap(portfolio.corr_comm, vmin=-1, vmax=1, cmap='vlag')
+    plt.title(f'{algo} Community\nCorrelation Matrix')
+    plt.xlabel('Community')
+    plt.ylabel('Community')
+    plt.savefig(dir_fig + f'corr_{algo}.png')
+    plt.show()
+
 # %% [markdown]
 # ## Back-Testing (1 Year)
 #

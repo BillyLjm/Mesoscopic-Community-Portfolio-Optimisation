@@ -121,8 +121,10 @@ class Portfolio:
 
         Returns
         -------
-        np.ndarray
+        corr : np.ndarray
             The mesoscopically-filtered correlation matrix.
+        cov : np.ndarray
+            The mesoscopically-filtered covariance matrix.
         """
         # filter mesoscopic eigenvalue & eigenvectors
         eigvals, eigvecs, components, _, _ = self.mesoscopic_decompose()
@@ -156,7 +158,7 @@ class Portfolio:
 
         Returns
         -------
-        dict
+        risk : dict
             Maps component to cumulative risk
         """
         eigvals, _, components, _, _ = self.mesoscopic_decompose(start, end)
@@ -180,8 +182,8 @@ class Portfolio:
 
         Returns
         -------
-        pd.DataFrame
-            DataFrame indexed by window start, with components as columns
+        cum_risk : pd.DataFrame
+            DataFrame of risk indexed by window start, with components as columns
         """
         idx = range(0, self.returns.shape[0] - window, step)
         with tqdm_joblib(tqdm(total=len(idx))) as progress_bar:
@@ -219,7 +221,7 @@ class Portfolio:
 
         Returns
         -------
-        dict
+        communities : dict
             Dictionary mapping asset ticker to identified community (0,1,2,...)
         """
         # Louvain community detection
@@ -284,18 +286,24 @@ class Portfolio:
 
         Returns
         -------
-        dict
+        weights : dict
             Dictionary mapping identified community to GMV portfolio weight
+        corr_comm : np.ndarray of shape (C, C)
+            Inter-community correlation matrix, where C is the number of communities.
+        cov_comm : np.ndarray of shape (C, C)
+            Inter-community covariance matrix, where C is the number of communities.
         """
         # aggregate correlation matrices by sector
         wts = self.cov.columns.map(self.communities)
         tmp = np.eye(np.max(wts)+1)
         wts = np.array([tmp[i] for i in wts])
-        corr_comm = wts.T @ self.cov.values @ wts
+        self.cov_comm = wts.T @ self.cov.values @ wts
+        stdev = np.sqrt(np.diag(self.cov_comm))
+        self.corr_comm = self.cov_comm / np.outer(stdev, stdev)
 
         # GMV optimise
-        w = cp.Variable(corr_comm.shape[0])
-        objective = cp.Minimize(cp.quad_form(w, corr_comm))
+        w = cp.Variable(self.cov_comm.shape[0])
+        objective = cp.Minimize(cp.quad_form(w, self.cov_comm))
         if short:
             constraints = [cp.sum(w) == 1]
         else:
@@ -305,6 +313,6 @@ class Portfolio:
 
         # save optimised weights, and convert back to assets
         ncomm = Counter(self.communities.values())
-        weights = [w.value[i] / ncomm[i] for i in range(corr_comm.shape[0])]
+        weights = [w.value[i] / ncomm[i] for i in range(self.cov_comm.shape[0])]
         self.weights = dict(map(lambda x: (x[0], weights[x[1]]), self.communities.items()))
-        return self.weights
+        return self.weights, self.corr_comm, self.cov_comm
