@@ -59,7 +59,7 @@ class Portfolio:
         # Laloux filter
         self.corr, self.cov = self.mesoscopic_filter()
         self.communities = self.community_detection(algo)
-        self.weights = self.gmv_portfolio()
+        self.weights, self.corr_comm, self.cov_comm = self.gmv_portfolio()
 
     ##########################
     # Mesoscopic Correlation #

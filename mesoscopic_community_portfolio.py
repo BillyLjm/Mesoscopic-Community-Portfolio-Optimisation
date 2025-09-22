@@ -217,9 +217,10 @@ returns.head()
 # %%
 # calculate aggregate metrics
 summary = {}
-summary['Sharpe Ratio'] = returns.mean() / returns.std() * np.sqrt(252)
 summary['Mean Reliability'] = reliability.mean()
 summary['Median Reliability'] = reliability.median()
+summary['Volatility'] = returns.std() * np.sqrt(252)
+summary['Sharpe Ratio'] = returns.mean() / returns.std() * np.sqrt(252)
 summary['Mean Num Communities'] = ncomm.mean()
 summary['Median Num Communities'] = ncomm.median()
 summary = pd.DataFrame(summary)
@@ -284,9 +285,10 @@ returns.head()
 # %%
 # calculate aggregate metrics
 summary = {}
-summary['Sharpe Ratio'] = returns.mean() / returns.std() * np.sqrt(252)
 summary['Mean Reliability'] = reliability.mean()
 summary['Median Reliability'] = reliability.median()
+summary['Volatility'] = returns.std() * np.sqrt(252)
+summary['Sharpe Ratio'] = returns.mean() / returns.std() * np.sqrt(252)
 summary['Mean Num Communities'] = ncomm.mean()
 summary['Median Num Communities'] = ncomm.median()
 summary = pd.DataFrame(summary)
