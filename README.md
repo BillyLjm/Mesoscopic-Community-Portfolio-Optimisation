@@ -23,7 +23,11 @@ The approach is intended for equity or asset universes where noisy sample correl
 
 ## File/class summary
 
-### portfolio.py
+### [mesoscopic_community_portfolio.pdf](mesoscopic_community_portfolio.pdf)
+
+The academic report written about this study.
+
+### [portfolio.py](portfolio.py)
 
 `Portfolio` — main class. Important public methods and attributes:
 - `__init__(price_data, sectors, algo='Louvain')`
@@ -53,7 +57,7 @@ Attributes filled during init (and refreshable by calling corresponding methods)
 - `communities` — maps ticker to community label (dictionary)
 - `weights` — maps ticker to optimised portfolio weight (dictionary)
 
-### mesoscopic_community_portfolio.ipynb
+### [mesoscopic_community_portfolio.ipynb](mesoscopic_community_portfolio.ipynb)
 
 - `mesoscopic_community_portfolio.ipynb`: applies the `portfolio` class to the sp500, and generates the plots for our report
 - `mesoscopic_community_portfolio.py`: code version of the ipynb for version logging; generated via jupytext.
